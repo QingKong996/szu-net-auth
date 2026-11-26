@@ -25,8 +25,8 @@
 
 | 上游函数 | 本项目对应实现 | 沿用的内容 |
 |---|---|---|
-| `login(type)` | `auth.sh` → `login_drcom()` | 两个旧 Drcom 门户 URL（`https://drcom.szu.edu.cn/a70.htm`、`http://172.30.255.2/0.htm`）；POST 字段名 `DDDDD` / `upass` / `0MKKey`；`0MKKey` 的两个取值 —— WIFI 线为 `123456`，有线为「登　录」二字的 GBK 编码 `%B5%C7%A1%A1%C2%BC`；从响应里用 `msga='...'` 提取错误信息 |
-| `newLogin()` | `auth.sh` → `login_eportal()` | eportal 门户地址 `http://172.30.255.42:801/eportal/portal/login`；完整查询参数（`callback=dr1003`、`login_method=1`、`user_account=,0,{卡号}`、`wlan_user_mac=000000000000`、`jsVersion=4.1.3`、`terminal_type=1` 等）；JSONP 剥壳方式；以及判定规则 —— `result==1` 成功，`ret_code==2`（IP 已在线）也视为成功 |
+| `login(type)` | 早期版本曾移植；当前单账号版不再调用旧 Drcom 接口 | 上游旧门户的 URL、POST 字段与 GBK 响应处理方式 |
+| `newLogin()` | `auth.sh` → `portal_login_request()` / `login_once()` | eportal 门户地址 `http://172.30.255.42:801/eportal/portal/login`；完整查询参数（`callback=dr1003`、`login_method=1`、`user_account=,0,{卡号}`、`wlan_user_mac=000000000000`、`jsVersion=4.1.3`、`terminal_type=1` 等）；JSONP 字段解析；以及 `result==1` / `ret_code==2` 判定规则 |
 
 字符串常量 `123456` 与 `000000000000` 是**协议本身规定的固定值**，不是任何人的账号信息。
 
@@ -73,7 +73,7 @@ ceynri/szu-network-connecter         浏览器扩展（JavaScript），MIT，202
          ▼  改写为 POSIX shell + procd + LuCI
       路由器版（shell 脚本，本仓库的前身）
       files/etc/szu-netauth/auth.sh
-         ▼  打包为标准 .ipk
+         ▼  打包为标准 .apk / .ipk
       本仓库 luci-app-szu-netauth
 ```
 
@@ -85,7 +85,7 @@ ceynri/szu-network-connecter         浏览器扩展（JavaScript），MIT，202
 - 语言：JavaScript / C# → POSIX shell（BusyBox 兼容）
 - 运行环境：浏览器 / Windows 桌面 → OpenWrt 路由器，procd 常驻守护进程
 - 新增：断电重启友好、重连节流（每分钟一次、最多 5 次）、
-  IPv4 强制 ICMP、HTTP 重定向检测、心跳看门狗、LuCI 网页界面
+  WAN 源地址绑定、公网重定向检测、心跳看门狗、LuCI 网页界面
 - 修正：上游 C# 版对 `ret_code` 的解析在遇到带引号的字符串值时会误判，
   本版已兼容
 

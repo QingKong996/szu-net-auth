@@ -32,7 +32,9 @@ jobs:
           done
           # build-ipk.sh 是 **bash** 脚本（用了数组），必须用 bash 校验。
           # 千万不要拿 sh -n 去测它 —— dash 会报 `Syntax error: "(" unexpected`。
-          if ! bash -n build-ipk.sh; then echo "语法错误: build-ipk.sh"; fail=1; fi
+          for f in build-ipk.sh build-apk.sh; do
+            if ! bash -n "$f"; then echo "语法错误: $f"; fail=1; fi
+          done
           exit $fail
 
       - name: 检查前端 JS 语法

@@ -5,258 +5,212 @@
 'require ui';
 'require rpc';
 
-/*
- * 深大校园网自动认证 · 状态页
- *
- * 设计原则（见 PLAN.md 第 3 节）：本页只是**薄壳** —— 读状态 / 点按钮。
- * 真正的认证逻辑全在 /etc/szu-netauth/auth.sh 里，所以本页即使报错，
- * 掉线自动重连照常工作。
- *
- * 「立即检测 / 立即登录」按钮走的是 auth.sh --trigger：只写一个唤醒文件就
- * 立刻返回，由常驻循环去做实际的探测与登录。这样不会让 rpcd 的 exec 调用
- * 因为等 20 秒的 curl 而超时。
- */
-
 var AUTH = '/etc/szu-netauth/auth.sh';
-var SVC  = 'szu-netauth';
+var SVC = 'szu-netauth';
 
 var callRcList = rpc.declare({
-	object: 'rc', method: 'list', params: [ 'name' ], expect: { '': {} }
+	object: 'rc', method: 'list', expect: { '': {} }
 });
 
 var callRcInit = rpc.declare({
 	object: 'rc', method: 'init', params: [ 'name', 'action' ], expect: { result: false }
 });
 
-// 备用：LuCI 自己的启动项接口。rpcd 的 rc 对象只解析 init 脚本开头有限字节
-// （本机实测约 580–640 B），一旦 START 落在窗口外，rc list 会把 start/stop
-// 丢掉并且把 enabled 误报成 false。这里用 getInitList 兜住那种情况。
-var callInitList = rpc.declare({
-	object: 'luci', method: 'getInitList', params: [ 'name' ], expect: { '': {} }
-});
-
 var STATE_LABEL = {
-	online:   '在线（已认证）',
-	offline:  '离线，正在尝试登录',
-	fail:     '登录失败，稍后重试',
-	giveup:   '已停手：本轮重连失败',
-	waiting:  '等待 WAN 获取地址',
-	backoff:  '退避等待中',              // 兼容旧版本可能残留的状态值
-	nocampus: '不在校园网',
-	disabled: '已停用（enabled=0）',
-	stopped:  '服务未运行'
-};
-
-var OFFLINE_KIND_LABEL = {
-	hijack:  'ping 通但 HTTP 被劫持 —— 典型的未认证',
-	noroute: 'ping 也不通 —— 网络层可能有问题'
+	online: '在线（已认证）',
+	offline: '离线，正在认证',
+	fail: '登录失败，等待重试',
+	giveup: '本轮重试已结束',
+	waiting: '等待 WAN 地址',
+	upstream: '认证入口或上游不可达',
+	disabled: '自动认证已停用',
+	unconfigured: '尚未配置账号',
+	stopped: '服务未运行'
 };
 
 var COLOR_HEX = {
-	green:  '#2e7d32',
+	green: '#2e7d32',
 	orange: '#ef6c00',
-	red:    '#c62828',
-	grey:   '#757575'
+	red: '#c62828',
+	grey: '#757575'
 };
 
-function pad2(n) { return (n < 10 ? '0' : '') + n; }
+function pad2(n) {
+	return (n < 10 ? '0' : '') + n;
+}
 
 function fmtTs(ts) {
 	ts = +ts;
-	if (!ts || ts <= 0) return '—';
+	if (!ts || ts <= 0)
+		return '—';
 	var d = new Date(ts * 1000);
-	return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' +
-		pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+	return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) +
+		' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
 }
 
-/* 把秒数写成人类看得懂的样子：3600 -> "60 分钟"，90 -> "90 秒" */
 function fmtDur(sec) {
 	sec = +sec;
-	if (!sec || sec <= 0) return '—';
-	if (sec % 3600 === 0) return (sec / 3600) + ' 小时';
-	if (sec % 60 === 0) return (sec / 60) + ' 分钟';
+	if (!sec || sec <= 0)
+		return '—';
+	if (sec % 3600 === 0)
+		return (sec / 3600) + ' 小时';
+	if (sec % 60 === 0)
+		return (sec / 60) + ' 分钟';
 	return sec + ' 秒';
 }
 
 function delay(ms) {
-	return new Promise(function(res) { window.setTimeout(res, ms); });
+	return new Promise(function(resolve) {
+		window.setTimeout(resolve, ms);
+	});
 }
 
-function byId(id) { return document.getElementById(id); }
-
-function setText(id, s) {
-	var e = byId(id);
-	if (e) e.textContent = (s == null || s === '') ? '—' : String(s);
+function byId(id) {
+	return document.getElementById(id);
 }
 
-function notify(msg, level) {
-	ui.addNotification(null, E('p', {}, msg), level || 'info');
+function setText(id, value) {
+	var node = byId(id);
+	if (node)
+		node.textContent = (value == null || value === '') ? '—' : String(value);
 }
 
-function vrow(title, node) {
+function notify(message, level) {
+	ui.addNotification(null, E('p', {}, message), level || 'info');
+}
+
+function valueRow(title, node) {
 	return E('div', { 'class': 'cbi-value' }, [
 		E('label', { 'class': 'cbi-value-title' }, title),
 		E('div', { 'class': 'cbi-value-field' }, node)
 	]);
 }
 
-function mkbtn(label, fn, cls) {
+function button(label, handler, className) {
 	return E('button', {
-		'class': 'btn cbi-button ' + (cls || 'cbi-button-neutral'),
+		'class': 'btn cbi-button ' + (className || 'cbi-button-neutral'),
 		'style': 'margin:0 6px 6px 0',
-		'click': function(ev) { if (ev) ev.preventDefault(); return fn(); }
+		'click': function(ev) {
+			if (ev)
+				ev.preventDefault();
+			return handler();
+		}
 	}, [ label ]);
 }
 
-/* ---------------- 数据读取 ---------------- */
-
 function readStatus() {
 	return fs.exec(AUTH, [ '--status' ]).then(function(res) {
-		var out = (res && res.stdout) ? res.stdout.trim() : '';
-		if (out === '') return null;
-		try { return JSON.parse(out); } catch (e) { return null; }
+		var output = res && res.stdout ? res.stdout.trim() : '';
+		if (!output)
+			return null;
+		try {
+			return JSON.parse(output);
+		}
+		catch (e) {
+			return null;
+		}
 	});
 }
 
 function readLog() {
 	return fs.exec(AUTH, [ '--tail', '50' ]).then(function(res) {
-		return (res && res.stdout) ? res.stdout.replace(/\s+$/, '') : '';
+		return res && res.stdout ? res.stdout.replace(/\s+$/, '') : '';
 	});
 }
 
-function readSvc() {
-	return Promise.all([
-		callRcList(SVC).then(function(res) {
-			return (res && res[SVC]) ? res[SVC] : {};
-		}).catch(function() { return {}; }),
-		callInitList(SVC).then(function(res) {
-			return (res && res[SVC]) ? res[SVC] : {};
-		}).catch(function() { return {}; })
-	]).then(function(r) {
-		var rc = r[0] || {}, il = r[1] || {};
+function readService() {
+	return callRcList().then(function(res) {
+		var rc = res && res[SVC] ? res[SVC] : {};
 		return {
-			// running 只有 rc list 给，取不到就退回 status.json 的 daemon_running
-			running: (typeof rc.running === 'boolean') ? rc.running : null,
-			// rc list 若连 start 都没解析出来，说明踩到了上面那个前缀窗口坑，
-			// 此时它的 enabled 不可信，改用 getInitList
-			enabled: (rc.start != null) ? rc.enabled
-				: ((typeof il.enabled === 'boolean') ? il.enabled : null)
+			running: typeof rc.running === 'boolean' ? rc.running : null,
+			enabled: typeof rc.enabled === 'boolean' ? rc.enabled : null
 		};
+	}).catch(function() {
+		return { running: null, enabled: null };
 	});
 }
 
-/* ---------------- 渲染与刷新 ---------------- */
-
-function paint(st, log, svc) {
-	st = st || {};
-	svc = svc || {};
+function paint(status, log, service) {
+	status = status || {};
+	service = service || {};
 
 	var badge = byId('szu-badge');
 	if (badge) {
-		badge.textContent = STATE_LABEL[st.state] || (st.state || '未知');
+		badge.textContent = STATE_LABEL[status.state] || status.state || '未知';
 		badge.style.cssText = 'display:inline-block;padding:2px 10px;border-radius:10px;' +
-			'color:#fff;font-weight:bold;background:' + (COLOR_HEX[st.color] || COLOR_HEX.grey);
+			'color:#fff;font-weight:bold;background:' +
+			(COLOR_HEX[status.color] || COLOR_HEX.grey);
 	}
 
-	var noData = (st.state == null && st.ts == null);
-	setText('szu-detail', noData
-		? '读不到状态：服务可能从未运行过。若服务已在运行，请检查 /usr/share/rpcd/acl.d/luci-app-szu-netauth.json 是否已生效（需重启 rpcd）。'
-		: st.detail);
+	setText('szu-detail', status.detail);
+	setText('szu-check', fmtTs(status.ts));
+	setText('szu-wan-iface', status.wan_interface);
+	setText('szu-wan-ip', status.wan_ip);
+	setText('szu-portal', status.portal ? '可达' : '不可达');
+	setText('szu-configured', status.configured ? '已设置' : '未设置，请前往「设置」');
+	setText('szu-online', status.online ? '是（公网探测通过）' : '否');
+	setText('szu-last-login',
+		(status.last_login ? fmtTs(status.last_login) : '尚无登录记录') +
+		(status.last_login_result ? '　·　' + status.last_login_result : ''));
 
-	setText('szu-check', fmtTs(st.ts));
-	setText('szu-wan', st.wan_ip);
-	setText('szu-campus', st.campus ? '是' : '否');
-	setText('szu-online', st.online ? '是（已认证）' : '否');
+	var failures = +status.fail_count || 0;
+	var retryMax = +status.retry_max || 0;
+	setText('szu-retry', failures > 0
+		? failures + '/' + (retryMax || '?') + ' 次失败'
+		: '本轮无失败');
+	setText('szu-interval', '在线复检 ' + fmtDur(status.net_check) +
+		'，失败重试 ' + fmtDur(status.retry_interval));
+	setText('szu-portal-url', status.portal_url);
 
-	// 离线成因：由后端用 ICMP 把「被门户劫持」和「网络层不通」分开
-	var kind = st.offline_kind ? OFFLINE_KIND_LABEL[st.offline_kind] : '';
-	setText('szu-kind', kind || '—');
+	var running = typeof service.running === 'boolean'
+		? service.running : !!status.daemon_running;
+	setText('szu-service', running ? '运行中' : '已停止');
+	setText('szu-autostart', typeof service.enabled === 'boolean'
+		? (service.enabled ? '已启用' : '未启用') : '—');
 
-	setText('szu-lastlogin',
-		(st.last_login ? fmtTs(st.last_login) : '尚无登录记录') +
-		(st.last_login_result ? '　·　' + st.last_login_result : ''));
-
-	// 多账号：总数 + 打码后的列表（后端只给打码值，明文卡号永远不会到前端）
-	var nAcct = +st.account_count || 0;
-	setText('szu-accts', nAcct > 0
-		? (nAcct + ' 个：' + (st.accounts || '') +
-		   (nAcct > 1
-			? (st.auto_switch ? '　（失败后按顺序自动切换）' : '　（已关闭自动切换，只用第一个）')
-			: ''))
-		: '未配置 —— 请到「设置」页的账号列表里添加');
-	setText('szu-next-acct', st.next_account);
-	setText('szu-last-acct', st.last_account);
-
-	// 重连轮次：本轮已失败几次 / 上限几次
-	var fc = +st.fail_count || 0, rmax = +st.retry_max || 0;
-	setText('szu-gate', fc > 0
-		? ('本轮第 ' + fc + '/' + (rmax || '?') + ' 次失败' +
-		   (st.next_retry ? '，下次重试 ' + fmtTs(st.next_retry) : '') +
-		   (st.state === 'giveup' ? '　（已停手，等下一个常规周期）' : ''))
-		: '正常（本轮无失败）');
-
-	setText('szu-iv', st.net_check
-		? fmtDur(st.interval) + '　（常规 ' + fmtDur(st.net_check) +
-		  ' / 非校园网 ' + fmtDur(st.campus_check) + '）'
-		: '—');
-
-	// ICMP 探测结果：-1 = 本轮未测，0 = 不通，1 = 通
-	var po = (typeof st.ping_ok === 'number') ? st.ping_ok : -1;
-	var phost = st.ping_host || '';
-	setText('szu-ping', po === 1
-		? ('通　' + (st.ping_ms ? st.ping_ms + ' ms' : '') + '　(' + phost + ')')
-		: po === 0
-			? ('不通　(' + phost + ')')
-			: '未测');
-
-	setText('szu-method', st.net_check_method);
-	setText('szu-paths', st.login_paths);
-
-	var running = (typeof svc.running === 'boolean') ? svc.running : !!st.daemon_running;
-	setText('szu-svc-run', running ? '运行中' : '已停止');
-	setText('szu-svc-en',  (typeof svc.enabled === 'boolean') ? (svc.enabled ? '已启用' : '未启用') : '—');
-
-	var lg = byId('szu-log');
-	if (lg) lg.textContent = (log && log.trim() !== '')
-		? log
-		: '（暂无日志：服务刚启动，或 logd 环形缓冲已滚动。日志只进内存，不写 flash。）';
+	var logNode = byId('szu-log');
+	if (logNode)
+		logNode.textContent = log && log.trim()
+			? log
+			: '暂无日志。运行日志默认保存在内存缓冲区，不写 flash。';
 }
 
 function refresh() {
 	return Promise.all([
 		readStatus().catch(function() { return null; }),
 		readLog().catch(function() { return null; }),
-		readSvc().catch(function() { return {}; })
-	]).then(function(r) {
-		paint(r[0], r[1], r[2]);
+		readService().catch(function() { return {}; })
+	]).then(function(results) {
+		paint(results[0], results[1], results[2]);
 	});
 }
 
-function trigger(what) {
-	return fs.exec(AUTH, [ '--trigger', what ]).then(function(res) {
-		var out = (res && res.stdout ? res.stdout : '').trim();
-		var err = (res && res.stderr ? res.stderr : '').trim();
+function trigger(action) {
+	return fs.exec(AUTH, [ '--trigger', action ]).then(function(res) {
+		var output = res && res.stdout ? res.stdout.trim() : '';
+		var error = res && res.stderr ? res.stderr.trim() : '';
 		if (res && res.code === 0)
-			notify(out || '已触发');
+			notify(output || '已触发');
 		else
-			notify(err || out || ('触发失败（返回码 ' + (res ? res.code : '?') + '）'), 'warning');
-		return delay(2500);
-	}).then(refresh).catch(function(e) {
-		notify('执行失败：' + (e.message || e), 'error');
+			notify(error || output || '触发失败', 'warning');
+		return delay(2000);
+	}).then(refresh).catch(function(err) {
+		notify('执行失败：' + (err.message || err), 'error');
 	});
 }
 
-function rcAct() {
-	var actions = Array.prototype.slice.call(arguments);
-	var p = Promise.resolve();
-	actions.forEach(function(a) {
-		p = p.then(function() { return callRcInit(SVC, a); });
+function runRc(actions) {
+	var promise = Promise.resolve();
+	actions.forEach(function(action) {
+		promise = promise.then(function() {
+			return callRcInit(SVC, action);
+		});
 	});
-	return p.then(function() {
+	return promise.then(function() {
 		notify('已执行：' + actions.join(' → '));
-		return delay(1200);
-	}).then(refresh).catch(function(e) {
-		notify('执行失败：' + (e.message || e), 'error');
+		return delay(1000);
+	}).then(refresh).catch(function(err) {
+		notify('执行失败：' + (err.message || err), 'error');
 	});
 }
 
@@ -265,7 +219,7 @@ return view.extend({
 		return Promise.all([
 			readStatus().catch(function() { return null; }),
 			readLog().catch(function() { return null; }),
-			readSvc().catch(function() { return {}; })
+			readService().catch(function() { return {}; })
 		]);
 	},
 
@@ -274,55 +228,48 @@ return view.extend({
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, '运行状态'),
 				E('div', { 'class': 'cbi-section-node' }, [
-					vrow('总体状态', E('div', {}, [
+					valueRow('总体状态', E('div', {}, [
 						E('span', { 'id': 'szu-badge' }, '读取中…'),
-						E('div', { 'style': 'margin-top:6px;color:#666' }, E('span', { 'id': 'szu-detail' }, '—'))
+						E('div', { 'style': 'margin-top:6px;color:#666' },
+							E('span', { 'id': 'szu-detail' }, '—'))
 					])),
-					vrow('最近检测', E('span', { 'id': 'szu-check' })),
-					vrow('WAN 地址', E('span', { 'id': 'szu-wan' })),
-					vrow('校园网判定', E('span', { 'id': 'szu-campus' })),
-					vrow('联网判定', E('span', { 'id': 'szu-online' })),
-					vrow('离线成因', E('span', { 'id': 'szu-kind' })),
-					vrow('ICMP 探测', E('span', { 'id': 'szu-ping' })),
-					vrow('判定方式', E('span', { 'id': 'szu-method' })),
-					vrow('上次登录结果', E('span', { 'id': 'szu-lastlogin' })),
-					vrow('账号列表', E('span', { 'id': 'szu-accts' })),
-					vrow('下次使用账号', E('span', { 'id': 'szu-next-acct' })),
-					vrow('上次使用账号', E('span', { 'id': 'szu-last-acct' })),
-					vrow('重连轮次', E('span', { 'id': 'szu-gate' })),
-					vrow('检测节奏', E('span', { 'id': 'szu-iv' })),
-					vrow('登录线路', E('span', { 'id': 'szu-paths' }))
+					valueRow('最近检测', E('span', { 'id': 'szu-check' })),
+					valueRow('WAN 接口', E('span', { 'id': 'szu-wan-iface' })),
+					valueRow('WAN IPv4', E('span', { 'id': 'szu-wan-ip' })),
+					valueRow('认证入口', E('span', { 'id': 'szu-portal' })),
+					valueRow('账号配置', E('span', { 'id': 'szu-configured' })),
+					valueRow('联网状态', E('span', { 'id': 'szu-online' })),
+					valueRow('上次登录', E('span', { 'id': 'szu-last-login' })),
+					valueRow('本轮重试', E('span', { 'id': 'szu-retry' })),
+					valueRow('运行节奏', E('span', { 'id': 'szu-interval' })),
+					valueRow('门户地址', E('span', { 'id': 'szu-portal-url' }))
 				])
 			]),
 
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, '服务与自启'),
 				E('div', { 'class': 'cbi-section-node' }, [
-					vrow('常驻服务', E('span', { 'id': 'szu-svc-run' })),
-					vrow('开机自启', E('span', { 'id': 'szu-svc-en' })),
-					vrow('服务操作', E('div', {}, [
-						mkbtn('启动服务', function() { return rcAct('start'); }, 'cbi-button-apply'),
-						mkbtn('停止服务', function() { return rcAct('stop'); }),
-						mkbtn('启用开机自启', function() { return rcAct('enable'); }),
-						mkbtn('关闭开机自启', function() { return rcAct('disable'); })
-					])),
-					vrow('', E('div', { 'style': 'color:#666' },
-						'提示：「启用自动认证」这个业务开关在「设置」页。这里只控制服务进程与开机自启。'))
+					valueRow('常驻服务', E('span', { 'id': 'szu-service' })),
+					valueRow('开机自启', E('span', { 'id': 'szu-autostart' })),
+					valueRow('服务操作', E('div', {}, [
+						button('启动服务', function() { return runRc([ 'start' ]); }, 'cbi-button-apply'),
+						button('停止服务', function() { return runRc([ 'stop' ]); }),
+						button('启用开机自启', function() { return runRc([ 'enable' ]); }),
+						button('关闭开机自启', function() { return runRc([ 'disable' ]); })
+					]))
 				])
 			]),
 
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, '手动操作'),
 				E('div', { 'class': 'cbi-section-node' }, [
-					vrow('立即操作', E('div', {}, [
-						mkbtn('立即检测', function() { return trigger('check'); }, 'cbi-button-action'),
-						mkbtn('立即登录', function() { return trigger('login'); }, 'cbi-button-action'),
-						mkbtn('刷新本页', function() { return refresh(); })
+					valueRow('立即执行', E('div', {}, [
+						button('检测连接', function() { return trigger('check'); }, 'cbi-button-action'),
+						button('重新认证', function() { return trigger('login'); }, 'cbi-button-action'),
+						button('刷新状态', refresh)
 					])),
-					vrow('', E('div', { 'style': 'color:#666' },
-						'「立即登录」会跳过在线判断直接认证一次，并把本轮重连计数清零' +
-						'（即重新开始最多「单轮最多尝试次数」次尝试）。两次点击之间仍受' +
-						'「两次登录最小间隔」限制。'))
+					valueRow('', E('div', { 'style': 'color:#666' },
+						'「重新认证」会立即从 WAN 提交一次登录；请勿连续点击，避免触发门户限流。'))
 				])
 			]),
 
@@ -334,18 +281,15 @@ return view.extend({
 						'style': 'max-height:340px;overflow:auto;white-space:pre-wrap;word-break:break-all;' +
 							'font-size:12px;line-height:1.45;margin:0;padding:8px;' +
 							'background:rgba(127,127,127,.08);border-radius:4px'
-					}, '（加载中…）'),
+					}, '加载中…'),
 					E('div', { 'style': 'margin-top:8px;color:#666' },
-						'日志走 logd 的内存环形缓冲，不写 flash。命令行等价查看：logread -e szu-netauth | tail -50')
+						'日志不会显示校园网卡号或密码。')
 				])
 			])
 		]);
 
 		paint(data[0], data[1], data[2]);
-
-		// 每 5 秒自动刷新一次（对齐 Windows 版的实时状态显示）
-		poll.add(function() { return refresh(); }, 5);
-
+		poll.add(refresh, 5);
 		return container;
 	},
 
