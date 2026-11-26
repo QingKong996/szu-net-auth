@@ -57,11 +57,11 @@ from pathlib import Path
 SOURCE_DATE_EPOCH = 1767225600
 
 PKG_NAME = "luci-app-szu-netauth"
-DEFAULT_VERSION = "1.1.1"
+DEFAULT_VERSION = "2.0.0"
 DEFAULT_RELEASE = "1"
 DEFAULT_ARCH = "all"
-DEFAULT_SOURCE = "https://github.com/Baibook-craft/szu-net-auth"
-DEFAULT_MAINTAINER = "baibook <240120311+Baibook-craft@users.noreply.github.com>"
+DEFAULT_SOURCE = "https://github.com/QingKong996/szu-net-auth"
+DEFAULT_MAINTAINER = "QingKong996"
 
 # 用 GNU tar 格式：实测官方 ipk 的外层 tar magic 就是 b"ustar  \\0"（GNU 风格），
 # 而 opkg 的 get_header_tar() 只要求前 5 字节为 "ustar"。

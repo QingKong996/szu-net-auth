@@ -8,7 +8,7 @@
 # 用法：
 #   ./build-ipk.sh                 # 打包到 dist/
 #   ./build-ipk.sh --inspect       # 打包后顺便把包体结构打印出来自检
-#   ./build-ipk.sh --version 1.1.0 --release 2
+#   ./build-ipk.sh --version 2.0.0 --release 1
 #
 set -euo pipefail
 
