@@ -65,10 +65,14 @@ make package/luci-app-szu-netauth/compile V=s
 把 `.apk` 上传到路由器：
 
 ```sh
-scp luci-app-szu-netauth-2.0.0-r1.apk root@192.168.1.1:/tmp/
+scp -O luci-app-szu-netauth-2.0.0-r1.apk root@192.168.1.1:/tmp/
 ssh root@192.168.1.1
 apk add --allow-untrusted /tmp/luci-app-szu-netauth-2.0.0-r1.apk
 ```
+
+`scp -O` 强制使用旧版 SCP 协议。OpenWrt 的精简 Dropbear 通常不带
+`sftp-server`，因此新版 OpenSSH 默认走 SFTP 时会报
+`/usr/libexec/sftp-server: not found`。
 
 SDK 本地构建的包没有 OpenWrt 官方签名，所以需要 `--allow-untrusted`。正式发布时
 应由维护者使用固定密钥签名。

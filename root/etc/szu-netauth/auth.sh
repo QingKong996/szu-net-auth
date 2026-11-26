@@ -376,6 +376,7 @@ daemon_main() {
 
 		cfg
 		WANIP=$(wan_ip)
+		PORTAL_OK=0
 		LOGIN_KIND=''
 		_wake=$(cat "$WAKE_FILE" 2>/dev/null)
 		rm -f "$WAKE_FILE"

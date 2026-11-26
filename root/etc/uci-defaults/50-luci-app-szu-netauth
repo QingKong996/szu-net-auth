@@ -3,16 +3,21 @@
 
 [ -n "${IPKG_INSTROOT}" ] && exit 0
 
-# 旧的多账号版本升级到单账号版本时，只迁移文件中的第一个可用账号。
-# 新版本不再读取或轮换其他账号。
+# 旧的多账号版本升级到单账号版本时，只迁移文件中的第一个完整可用账号。
+# 新版本不再读取或轮换其他账号。全局旧字段只有在卡号和密码都非空时才算
+# 可用，避免一个残缺字段导致下面误删本来能用的账号。
 _global_id=$(uci -q get szu-netauth.global.cardid)
-if [ -z "$_global_id" ]; then
+_global_pw=$(uci -q get szu-netauth.global.password)
+if [ -z "$_global_id" ] || [ -z "$_global_pw" ]; then
 	for _section in $(uci -q show szu-netauth 2>/dev/null \
 		| sed -n 's/^szu-netauth\.\([^.=]*\)=account$/\1/p'); do
 		_migrate_id=$(uci -q get "szu-netauth.$_section.cardid")
-		[ -n "$_migrate_id" ] || continue
+		_migrate_pw=$(uci -q get "szu-netauth.$_section.password")
+		if [ -z "$_migrate_id" ] || [ -z "$_migrate_pw" ]; then
+			continue
+		fi
 		uci -q set szu-netauth.global.cardid="$_migrate_id"
-		uci -q set szu-netauth.global.password="$(uci -q get "szu-netauth.$_section.password")"
+		uci -q set szu-netauth.global.password="$_migrate_pw"
 		break
 	done
 fi

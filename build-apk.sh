@@ -100,6 +100,24 @@ case "$1" in
 			/etc/init.d/szu-netauth stop 2>/dev/null
 			/etc/init.d/szu-netauth disable 2>/dev/null
 		fi
+
+		# stop 通过 procd 异步完成。若包管理器立刻删掉 init.d / auth.sh，
+		# 尚未退出的 daemon 会变成无人监管的孤儿进程。
+		_pidfile=/var/run/szu-netauth/daemon.pid
+		_i=0
+		while [ "$_i" -lt 15 ]; do
+			_dp=$(cat "$_pidfile" 2>/dev/null)
+			[ -z "$_dp" ] || ! kill -0 "$_dp" 2>/dev/null && break
+			sleep 1
+			_i=$((_i + 1))
+		done
+
+		_dp=$(cat "$_pidfile" 2>/dev/null)
+		if [ -n "$_dp" ] && kill -0 "$_dp" 2>/dev/null; then
+			kill "$_dp" 2>/dev/null
+			sleep 1
+			kill -9 "$_dp" 2>/dev/null
+		fi
 		;;
 esac
 exit 0
